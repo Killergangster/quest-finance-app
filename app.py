@@ -198,7 +198,11 @@ def main():
                 for index, row in goals_df.iterrows():
                     goal_id, _, name, target, current, img_url = row
                     progress = (current / target) * 100 if target > 0 else 0
-                    st.markdown(f"**{name}**"); st.progress(int(progress)); st.text(f"₹{int(current):,} / ₹{int(target):,}")
+                    
+                    # --- THIS IS THE FIX ---
+                    # The progress bar value is now capped at 100
+                    st.markdown(f"**{name}**"); st.progress(min(int(progress), 100)); st.text(f"₹{int(current):,} / ₹{int(target):,}")
+                    
                     with st.form(key=f"goal_{goal_id}"):
                         amount_to_add = st.number_input("Add to this goal", min_value=1.0, step=100.0, format="%.2f")
                         if st.form_submit_button("Add Savings"):
