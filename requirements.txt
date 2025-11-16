@@ -4,5 +4,3 @@ sqlalchemy
 matplotlib
 reportlab
 openpyxl
-st-audiorec
-SpeechRecognition
