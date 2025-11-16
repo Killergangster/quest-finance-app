@@ -9,15 +9,13 @@ def make_hashes(password):
 conn = sqlite3.connect('expenses.db')
 c = conn.cursor()
 
-# --- USERS TABLE ---
+# --- USER & EXPENSE TABLES ---
 c.execute('''
 CREATE TABLE IF NOT EXISTS users (
     username TEXT PRIMARY KEY,
     password TEXT NOT NULL
 )
 ''')
-
-# --- EXPENSES TABLE ---
 c.execute('''
 CREATE TABLE IF NOT EXISTS expenses (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -30,7 +28,7 @@ CREATE TABLE IF NOT EXISTS expenses (
 )
 ''')
 
-# --- GOALS TABLE ---
+# --- GAMIFICATION TABLES ---
 c.execute('''
 CREATE TABLE IF NOT EXISTS goals (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,8 +40,6 @@ CREATE TABLE IF NOT EXISTS goals (
     FOREIGN KEY (username) REFERENCES users (username)
 )
 ''')
-
-# --- BADGES TABLE ---
 c.execute('''
 CREATE TABLE IF NOT EXISTS badges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -55,22 +51,7 @@ CREATE TABLE IF NOT EXISTS badges (
 )
 ''')
 
-# --- DEBTS TABLE ---
-c.execute('''
-CREATE TABLE IF NOT EXISTS debts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    expense_id INTEGER NOT NULL,
-    payer_username TEXT NOT NULL,
-    owes_username TEXT NOT NULL,
-    amount REAL NOT NULL,
-    status TEXT DEFAULT 'unpaid',
-    FOREIGN KEY (expense_id) REFERENCES expenses (id),
-    FOREIGN KEY (payer_username) REFERENCES users (username),
-    FOREIGN KEY (owes_username) REFERENCES users (username)
-)
-''')
-
-# --- Add default users (with custom admin) ---
+# --- ADD DEFAULT USERS (WITH CUSTOM ADMIN) ---
 try:
     c.execute("INSERT INTO users (username, password) VALUES (?, ?)",
               ('Itachibanker19', make_hashes('Killer1980')))
@@ -83,4 +64,4 @@ except sqlite3.IntegrityError:
 conn.commit()
 conn.close()
 
-print("✅ expenses.db database is ready with all features!")
+print("✅ QuestFinance database created successfully with all features!")
