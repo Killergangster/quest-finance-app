@@ -4,5 +4,5 @@ sqlalchemy
 matplotlib
 reportlab
 openpyxl
-streamlit-audio-recorder
+st-audiorec
 SpeechRecognition
