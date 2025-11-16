@@ -12,6 +12,12 @@ from reportlab.lib import colors
 import subprocess
 import os
 
+# --- NEW IMPORTS FOR VOICE FEATURE ---
+from streamlit_audio_recorder import audio_recorder
+import speech_recognition as sr
+# --- END NEW IMPORTS ---
+
+
 # --- DATABASE SETUP ---
 DB_FILE = "expenses.db"
 engine = db.create_engine(f"sqlite:///{DB_FILE}")
@@ -35,13 +41,19 @@ def login_user(username, password):
         hashed_pass = result.scalar()
         if hashed_pass: return check_hashes(password, hashed_pass)
     return False
+def get_all_usernames(current_user):
+    with engine.connect() as conn:
+        result = conn.execute(db.text("SELECT username FROM users WHERE username != :user"), {"user": current_user})
+        return [row[0] for row in result]
 
-# --- EXPENSE MANAGEMENT ---
+# --- EXPENSE MANAGEMENT (with EDIT/DELETE) ---
 def add_expense(username, date, category, amount, description):
     with engine.connect() as conn:
-        conn.execute(db.text("INSERT INTO expenses(username, expense_date, category, amount, description) VALUES(:user, :date, :cat, :amt, :desc)"),
+        result = conn.execute(db.text("INSERT INTO expenses(username, expense_date, category, amount, description) VALUES(:user, :date, :cat, :amt, :desc) RETURNING id"),
                      {"user": username, "date": date, "cat": category, "amt": amount, "desc": description})
+        new_id = result.scalar()
         conn.commit()
+        return new_id
 def view_all_expenses(username, is_admin=False):
     with engine.connect() as conn:
         if is_admin:
@@ -51,9 +63,37 @@ def view_all_expenses(username, is_admin=False):
             query = "SELECT id, expense_date, category, amount, description FROM expenses WHERE username = :user"
             df = pd.read_sql(query, conn, params={"user": username})
     return df
+def get_expense_by_id(expense_id):
+    with engine.connect() as conn:
+        result = conn.execute(db.text("SELECT * FROM expenses WHERE id = :id"), {"id": expense_id})
+        return result.first()
+def edit_expense_data(expense_id, date, category, amount, description):
+    with engine.connect() as conn:
+        conn.execute(db.text("UPDATE expenses SET expense_date=:date, category=:cat, amount=:amt, description=:desc WHERE id=:id"),
+                     {"date": date, "cat": category, "amt": amount, "desc": description, "id": expense_id})
+        conn.commit()
 def delete_data(expense_id):
     with engine.connect() as conn:
+        # Also delete associated debts
+        conn.execute(db.text("DELETE FROM debts WHERE expense_id=:id"), {"id": expense_id})
         conn.execute(db.text("DELETE FROM expenses WHERE id=:id"), {"id": expense_id})
+        conn.commit()
+
+# --- DEBT MANAGEMENT ---
+def create_debt(expense_id, payer, owes_list, split_amount):
+    with engine.connect() as conn:
+        for user in owes_list:
+            conn.execute(db.text("INSERT INTO debts(expense_id, payer_username, owes_username, amount) VALUES(:exp_id, :payer, :owes, :amt)"),
+                         {"exp_id": expense_id, "payer": payer, "owes": user, "amt": split_amount})
+        conn.commit()
+def get_user_debts(username):
+    with engine.connect() as conn:
+        you_owe_df = pd.read_sql("SELECT id, payer_username, amount, expense_id FROM debts WHERE owes_username = :user AND status = 'unpaid'", conn, params={"user": username})
+        you_are_owed_df = pd.read_sql("SELECT id, owes_username, amount, expense_id FROM debts WHERE payer_username = :user AND status = 'unpaid'", conn, params={"user": username})
+    return you_owe_df, you_are_owed_df
+def settle_debt(debt_id):
+    with engine.connect() as conn:
+        conn.execute(db.text("UPDATE debts SET status = 'paid' WHERE id = :id"), {"id": debt_id})
         conn.commit()
 
 # --- GOAL & BADGE MANAGEMENT ---
@@ -96,7 +136,50 @@ def check_and_award_badges(username):
     if not df_goals.empty: award_badge(username, "Goal Setter")
     if not df_goals.empty and df_goals['current_amount'].sum() >= 10000: award_badge(username, "Super Saver")
 
-# --- AI SMART INSIGHTS FUNCTION ---
+# --- DATA VIZ & EXPORT ---
+def plot_expenses_by_category(df):
+    if df.empty: return None
+    category_summary = df.groupby('category')['amount'].sum()
+    fig, ax = plt.subplots(); category_summary.plot(kind='pie', ax=ax, autopct='%1.1f%%', startangle=90)
+    ax.set_ylabel(''); ax.set_title("Expenses by Category")
+    return fig
+def plot_expenses_over_time(df):
+    if df.empty: return None
+    df['expense_date'] = pd.to_datetime(df['expense_date'])
+    time_summary = df.set_index('expense_date').resample('M')['amount'].sum()
+    fig, ax = plt.subplots(); time_summary.plot(kind='line', ax=ax, marker='o')
+    ax.set_title("Monthly Spending"); ax.set_xlabel("Month"); ax.set_ylabel("Total Amount"); plt.grid(True)
+    return fig
+def plot_bar_chart_by_category(df):
+    if df.empty: return None
+    category_summary = df.groupby('category')['amount'].sum().sort_values(ascending=False)
+    fig, ax = plt.subplots(); category_summary.plot(kind='bar', ax=ax)
+    ax.set_title("Spending per Category"); ax.set_xlabel("Category"); ax.set_ylabel("Total Amount")
+    plt.xticks(rotation=45, ha='right')
+    return fig
+def export_to_excel(df):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Expenses')
+    return output.getvalue()
+def export_to_pdf(df, username, is_admin=False):
+    output = io.BytesIO()
+    doc = SimpleDocTemplate(output, pagesize=letter)
+    elements, styles = [], getSampleStyleSheet()
+    title = f"Expense Report for {username}" if not is_admin else "Full Company Expense Report"
+    elements.append(Paragraph(title, styles['h1']))
+    df_list = [df.columns.values.tolist()] + df.values.tolist()
+    table = Table(df_list)
+    style = TableStyle([('BACKGROUND', (0,0), (-1,0), colors.grey), ('TEXTCOLOR',(0,0),(-1,0),colors.whitesmoke),
+                        ('ALIGN', (0,0), (-1,-1), 'CENTER'), ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+                        ('BOTTOMPADDING', (0,0), (-1,0), 12), ('BACKGROUND', (0,1), (-1,-1), colors.beige),
+                        ('GRID', (0,0), (-1,-1), 1, colors.black)])
+    table.setStyle(style)
+    elements.append(table)
+    doc.build(elements)
+    return output.getvalue()
+
+# --- AI SMART INSIGHTS ---
 def generate_smart_insights(username):
     df = view_all_expenses(username)
     insights = []
@@ -117,23 +200,45 @@ def generate_smart_insights(username):
         last_spend = last_spend_series.get(current_top_cat, 0)
         if current_spend > last_spend * 1.2 and last_spend > 0:
             insights.append(f"💡 Heads up! Your spending on '{current_top_cat}' is ₹{current_spend:,.0f} so far, higher than all of last month (₹{last_spend:,.0f}).")
-        elif current_spend < last_spend:
-             insights.append(f"👍 Great job! You've spent less on '{current_top_cat}' this month (₹{current_spend:,.0f}) compared to last month (₹{last_spend:,.0f}).")
-    total_current = df_current['amount'].sum()
-    total_last = df_last['amount'].sum()
-    if total_current > total_last:
-        insights.append(f"📈 Your total spending this month (₹{total_current:,.0f}) is trending higher than last month (₹{total_last:,.0f}).")
     return insights if insights else ["Your spending is consistent with last month. Keep it up!"]
+
+# --- NEW: VOICE HELPER FUNCTION ---
+def parse_expense_from_text(text):
+    """
+    Extracts amount and category from a transcribed text.
+    """
+    words = text.lower().split()
+    amount = None
+    category = None
+    
+    # 1. Find amount (any word that is a number)
+    for word in words:
+        if word.isdigit():
+            amount = float(word)
+            break
+            
+    # 2. Find category (first word that matches our list)
+    categories_list = ["food", "transport", "shopping", "bills", "entertainment", "other"]
+    for word in words:
+        if word in categories_list:
+            category = word.capitalize()
+            break
+            
+    return amount, category
 
 # --- STREAMLIT APP ---
 def main():
-    st.set_page_config(page_title="QuestFinance", page_icon="🚀")
-    st.title("🚀 QuestFinance: Level Up Your Savings")
+    st.set_page_config(page_title="Expense Tracker", page_icon="💰")
+    st.title("💰 Personal Expense Tracker")
+
     if not os.path.exists(DB_FILE):
         subprocess.run(['python', 'create_db.py'], check=True)
+
     if 'logged_in' not in st.session_state:
         st.session_state.logged_in = False; st.session_state.username = ''; st.session_state.is_admin = False
+
     if not st.session_state.logged_in:
+        # --- LOGIN/SIGN UP ---
         choice = st.selectbox("Login or Sign Up", ["Login", "Sign Up"])
         if choice == "Login":
             st.subheader("Login Section")
@@ -155,40 +260,161 @@ def main():
                     else: st.error("That username is already taken.")
                 else: st.warning("Passwords do not match.")
     else:
+        # --- LOGGED-IN INTERFACE ---
         username = st.session_state.username
         check_and_award_badges(username)
+
         st.sidebar.subheader(f"Welcome {username}")
-        menu = ["Add Expense", "Summary", "Manage Records", "Goals & Achievements"]
+        # NEW: "Add by Voice" added to menu
+        menu = ["Add Expense", "Add by Voice", "Debts", "Summary", "Manage Records", "Goals & Achievements"]
         choice = st.sidebar.selectbox("Menu", menu)
+
         if st.sidebar.button("Logout"):
             st.session_state.logged_in = False; st.session_state.username = ''; st.session_state.is_admin = False; st.rerun()
 
         if choice == "Add Expense":
+            # --- MANUAL ADD EXPENSE PAGE ---
             st.subheader("Add a New Expense")
             with st.form("expense_form", clear_on_submit=True):
-                expense_date = st.date_input("Date", datetime.now()); category = st.selectbox("Category", ["Food", "Transport", "Shopping", "Bills", "Entertainment", "Other"])
-                amount = st.number_input("Amount", min_value=0.01, format="%.2f"); description = st.text_area("Description")
-                if st.form_submit_button("Add Expense"):
-                    add_expense(username, expense_date, category, amount, description); st.success("Expense added!")
+                expense_date = st.date_input("Date", datetime.now())
+                category = st.selectbox("Category", ["Food", "Transport", "Shopping", "Bills", "Entertainment", "Other"])
+                amount = st.number_input("Amount", min_value=0.01, format="%.2f")
+                description = st.text_area("Description")
+                st.markdown("---")
+                st.markdown("💸 **Split this Bill?**")
+                all_users = get_all_usernames(username)
+                split_with = st.multiselect("Select friends to split with:", all_users)
+                submitted = st.form_submit_button("Add Expense")
+                
+                if submitted:
+                    new_expense_id = add_expense(username, expense_date, category, amount, description)
+                    if split_with:
+                        num_people = len(split_with) + 1
+                        split_amount = round(amount / num_people, 2)
+                        create_debt(new_expense_id, username, split_with, split_amount)
+                        st.success(f"Expense added and split with {len(split_with)} people. Each owes ₹{split_amount:.2f}.")
+                    else:
+                        st.success("Expense added successfully!")
+        
+        # --- NEW "ADD BY VOICE" PAGE ---
+        elif choice == "Add by Voice":
+            st.subheader("Add Expense with your Voice")
+            st.info("Press 'Record', say your expense (e.g., '500 on Food'), and press 'Stop'.")
+            
+            # 1. CAPTURE AUDIO
+            audio_bytes = audio_recorder()
+            
+            if audio_bytes:
+                st.audio(audio_bytes, format="audio/wav")
+                
+                # Save to a temporary file
+                with open("temp_audio.wav", "wb") as f:
+                    f.write(audio_bytes)
+                
+                # 2. TRANSCRIBE AUDIO
+                r = sr.Recognizer()
+                try:
+                    with sr.AudioFile("temp_audio.wav") as source:
+                        audio_data = r.record(source)
+                        # Use Google's free speech recognition
+                        text = r.recognize_google(audio_data)
+                        st.write(f"**You said:** *{text}*")
+                        
+                        # 3. PARSE TEXT & SAVE
+                        amount, category = parse_expense_from_text(text)
+                        
+                        if amount and category:
+                            st.success(f"Found! Amount: **₹{amount}**, Category: **{category}**")
+                            if st.button("Confirm & Save"):
+                                add_expense(username, datetime.now(), category, amount, f"Logged via voice: {text}")
+                                st.balloons()
+                                st.success("Expense logged successfully!")
+                        else:
+                            st.error("Sorry, I couldn't understand the amount or category from your audio. Please try again or use the manual 'Add Expense' page.")
+                            
+                except sr.UnknownValueError:
+                    st.error("Google Speech Recognition could not understand the audio. Please try again.")
+                except sr.RequestError as e:
+                    st.error(f"Could not request results from Google Speech Recognition; {e}")
+                
+                # Clean up temp file
+                if os.path.exists("temp_audio.wav"):
+                    os.remove("temp_audio.wav")
+
+        # --- END NEW PAGE ---
+        
+        elif choice == "Debts":
+            st.subheader("💸 Your Debt Ledger")
+            you_owe_df, you_are_owed_df = get_user_debts(username)
+            col1, col2 = st.columns(2)
+            col1.metric("You Owe", f"₹{you_owe_df['amount'].sum():,.2f}", delta_color="inverse")
+            col2.metric("You Are Owed", f"₹{you_are_owed_df['amount'].sum():,.2f}")
+            st.markdown("---")
+            st.markdown("#### People You Owe")
+            if not you_owe_df.empty:
+                for index, row in you_owe_df.iterrows():
+                    col_name, col_amt, col_btn = st.columns([2, 2, 1])
+                    with col_name: st.text(f"Owe {row['payer_username']}:")
+                    with col_amt: st.text(f"₹{row['amount']:.2f}")
+                    with col_btn:
+                        if st.button("Mark as Paid", key=f"pay_{row['id']}", type="primary"):
+                            settle_debt(row['id']); st.success("Debt marked as paid!"); st.rerun()
+            else: st.info("You don't owe anyone anything. Great!")
+            st.markdown("---")
+            st.markdown("#### People Who Owe You")
+            if not you_are_owed_df.empty:
+                st.dataframe(you_are_owed_df.rename(columns={"owes_username": "User", "amount": "Amount Owed"}))
+            else: st.info("Nobody owes you money right now.")
 
         elif choice == "Summary":
             st.subheader("Expense Summary")
-            st.markdown("### 🤖 Smart Insights"); insights = generate_smart_insights(username)
+            st.markdown("### 🤖 AI-Powered Smart Insights")
+            insights = generate_smart_insights(username)
             for insight in insights: st.info(insight)
             st.markdown("---")
             df = view_all_expenses(username, st.session_state.is_admin)
-            if not df.empty: st.dataframe(df)
-            else: st.info("No expenses recorded yet.")
-        
-        elif choice == "Manage Records":
-             st.subheader("Manage Your Expenses"); df = view_all_expenses(st.session_state.username, st.session_state.is_admin)
-             if not df.empty:
+            if not df.empty:
                 st.dataframe(df)
+                col1, col2 = st.columns(2)
+                with col1: st.pyplot(plot_expenses_by_category(df))
+                with col2: st.pyplot(plot_bar_chart_by_category(df))
+                st.pyplot(plot_expenses_over_time(df))
+            else: st.info("No expenses recorded yet.")
+
+        elif choice == "Manage Records":
+            st.subheader("Manage Your Expenses")
+            df = view_all_expenses(st.session_state.username, st.session_state.is_admin)
+            if not df.empty:
+                st.dataframe(df)
+                st.markdown("### Export Data")
+                col1, col2 = st.columns(2)
+                with col1:
+                    excel_data = export_to_excel(df)
+                    st.download_button(label="📥 Export to Excel", data=excel_data, file_name=f"expenses.xlsx")
+                with col2:
+                    pdf_data = export_to_pdf(df, st.session_state.username, st.session_state.is_admin)
+                    st.download_button(label="📄 Export to PDF", data=pdf_data, file_name=f"report.pdf")
+                st.markdown("### Edit or Delete Records")
                 expense_ids = df['id'].tolist()
-                selected_id = st.selectbox("Select Expense ID to Delete", expense_ids)
-                if selected_id and st.button("Delete", key=f"delete_{selected_id}", type="primary"):
-                    delete_data(selected_id); st.success(f"Deleted record ID: {selected_id}"); st.rerun()
-             else: st.info("No records to manage.")
+                selected_id = st.selectbox("Select Expense ID to Manage", expense_ids)
+                if selected_id:
+                    col_edit, col_delete = st.columns([1, 1])
+                    with col_edit:
+                        if st.button("Edit", key=f"edit_{selected_id}"): st.session_state.edit_id = selected_id
+                    with col_delete:
+                        if st.button("Delete", key=f"delete_{selected_id}", type="primary"):
+                            delete_data(selected_id); st.success(f"Deleted record ID: {selected_id}"); st.rerun()
+                    if 'edit_id' in st.session_state and st.session_state.edit_id == selected_id:
+                        expense_to_edit = get_expense_by_id(selected_id)
+                        with st.form(key='edit_form'):
+                            edit_date = st.date_input("Date", value=pd.to_datetime(expense_to_edit.expense_date))
+                            edit_category = st.selectbox("Category", ["Food", "Transport", "Shopping", "Bills", "Entertainment", "Other"], index=["Food", "Transport", "Shopping", "Bills", "Entertainment", "Other"].index(expense_to_edit.category))
+                            edit_amount = st.number_input("Amount", value=expense_to_edit.amount)
+                            edit_description = st.text_area("Description", value=expense_to_edit.description)
+                            if st.form_submit_button("Save Changes"):
+                                edit_expense_data(selected_id, edit_date, edit_category, edit_amount, edit_description)
+                                st.success(f"Updated record ID: {selected_id}"); del st.session_state.edit_id; st.rerun()
+            else: st.info("No records to manage.")
 
         elif choice == "Goals & Achievements":
             st.subheader("🎯 Your Goals & Achievements")
@@ -198,11 +424,7 @@ def main():
                 for index, row in goals_df.iterrows():
                     goal_id, _, name, target, current, img_url = row
                     progress = (current / target) * 100 if target > 0 else 0
-                    
-                    # --- THIS IS THE FIX ---
-                    # The progress bar value is now capped at 100
                     st.markdown(f"**{name}**"); st.progress(min(int(progress), 100)); st.text(f"₹{int(current):,} / ₹{int(target):,}")
-                    
                     with st.form(key=f"goal_{goal_id}"):
                         amount_to_add = st.number_input("Add to this goal", min_value=1.0, step=100.0, format="%.2f")
                         if st.form_submit_button("Add Savings"):
@@ -226,4 +448,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
