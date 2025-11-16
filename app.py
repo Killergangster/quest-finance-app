@@ -13,7 +13,7 @@ import subprocess
 import os
 
 # --- NEW IMPORTS FOR VOICE FEATURE ---
-from streamlit_audio_recorder import audio_recorder
+from st_audiorec import st_audiorec # This line is NEW
 import speech_recognition as sr
 # --- END NEW IMPORTS ---
 
@@ -202,7 +202,7 @@ def generate_smart_insights(username):
             insights.append(f"💡 Heads up! Your spending on '{current_top_cat}' is ₹{current_spend:,.0f} so far, higher than all of last month (₹{last_spend:,.0f}).")
     return insights if insights else ["Your spending is consistent with last month. Keep it up!"]
 
-# --- NEW: VOICE HELPER FUNCTION ---
+# --- VOICE HELPER FUNCTION ---
 def parse_expense_from_text(text):
     """
     Extracts amount and category from a transcribed text.
@@ -265,7 +265,7 @@ def main():
         check_and_award_badges(username)
 
         st.sidebar.subheader(f"Welcome {username}")
-        # NEW: "Add by Voice" added to menu
+        # "Add by Voice" added to menu
         menu = ["Add Expense", "Add by Voice", "Debts", "Summary", "Manage Records", "Goals & Achievements"]
         choice = st.sidebar.selectbox("Menu", menu)
 
@@ -296,20 +296,20 @@ def main():
                     else:
                         st.success("Expense added successfully!")
         
-        # --- NEW "ADD BY VOICE" PAGE ---
+        # --- NEW "ADD BY VOICE" PAGE (with new recorder) ---
         elif choice == "Add by Voice":
             st.subheader("Add Expense with your Voice")
-            st.info("Press 'Record', say your expense (e.g., '500 on Food'), and press 'Stop'.")
+            st.info("Click the mic to record, click again to stop.")
             
             # 1. CAPTURE AUDIO
-            audio_bytes = audio_recorder()
+            wav_audio_data = st_audiorec() # This is the NEW recorder
             
-            if audio_bytes:
-                st.audio(audio_bytes, format="audio/wav")
+            if wav_audio_data:
+                st.audio(wav_audio_data, format="audio/wav")
                 
                 # Save to a temporary file
                 with open("temp_audio.wav", "wb") as f:
-                    f.write(audio_bytes)
+                    f.write(wav_audio_data)
                 
                 # 2. TRANSCRIBE AUDIO
                 r = sr.Recognizer()
