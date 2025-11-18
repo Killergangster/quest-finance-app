@@ -1,21 +1,21 @@
 import sqlite3
 import hashlib
 
-# Function to hash passwords
 def make_hashes(password):
     return hashlib.sha256(str.encode(password)).hexdigest()
 
-# Connect to the database
 conn = sqlite3.connect('expenses.db')
 c = conn.cursor()
 
-# --- USER & EXPENSE TABLES ---
+# --- 1. Users Table ---
 c.execute('''
 CREATE TABLE IF NOT EXISTS users (
     username TEXT PRIMARY KEY,
     password TEXT NOT NULL
 )
 ''')
+
+# --- 2. Expenses Table ---
 c.execute('''
 CREATE TABLE IF NOT EXISTS expenses (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS expenses (
 )
 ''')
 
-# --- GAMIFICATION TABLES ---
+# --- 3. Goals Table ---
 c.execute('''
 CREATE TABLE IF NOT EXISTS goals (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -40,6 +40,8 @@ CREATE TABLE IF NOT EXISTS goals (
     FOREIGN KEY (username) REFERENCES users (username)
 )
 ''')
+
+# --- 4. Badges Table ---
 c.execute('''
 CREATE TABLE IF NOT EXISTS badges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,7 +53,22 @@ CREATE TABLE IF NOT EXISTS badges (
 )
 ''')
 
-# --- ADD DEFAULT USERS (WITH CUSTOM ADMIN) ---
+# --- 5. Debts Table (REQUIRED FOR SPLIT BILL) ---
+c.execute('''
+CREATE TABLE IF NOT EXISTS debts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    expense_id INTEGER NOT NULL,
+    payer_username TEXT NOT NULL,
+    owes_username TEXT NOT NULL,
+    amount REAL NOT NULL,
+    status TEXT DEFAULT 'unpaid',
+    FOREIGN KEY (expense_id) REFERENCES expenses (id),
+    FOREIGN KEY (payer_username) REFERENCES users (username),
+    FOREIGN KEY (owes_username) REFERENCES users (username)
+)
+''')
+
+# Add default users
 try:
     c.execute("INSERT INTO users (username, password) VALUES (?, ?)",
               ('Itachibanker19', make_hashes('Killer1980')))
@@ -60,8 +77,6 @@ try:
 except sqlite3.IntegrityError:
     print("Default users already exist.")
 
-# Commit changes and close
 conn.commit()
 conn.close()
-
-print("✅ QuestFinance database created successfully with all features!")
+print("✅ Database updated with ALL tables (Users, Expenses, Goals, Badges, Debts).")
